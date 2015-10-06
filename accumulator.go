@@ -13,7 +13,7 @@ import (
 // BatchPoints is used to send a batch of data in a single write from telegraf
 // to influx
 type BatchPoints struct {
-	mu sync.Mutex
+	sync.Mutex
 
 	client.BatchPoints
 
@@ -30,8 +30,8 @@ func (bp *BatchPoints) Add(
 	val interface{},
 	tags map[string]string,
 ) {
-	bp.mu.Lock()
-	defer bp.mu.Unlock()
+	bp.Lock()
+	defer bp.Unlock()
 
 	measurement = bp.Prefix + measurement
 
@@ -72,8 +72,8 @@ func (bp *BatchPoints) AddFieldsWithTime(
 	// TODO this function should add the fields with the timestamp, but that will
 	// need to wait for the InfluxDB point precision/unit to be fixed
 	bp.AddFields(measurement, fields, tags)
-	// bp.mu.Lock()
-	// defer bp.mu.Unlock()
+	// bp.Lock()
+	// defer bp.Unlock()
 
 	// measurement = bp.Prefix + measurement
 
@@ -117,8 +117,8 @@ func (bp *BatchPoints) AddFields(
 	fields map[string]interface{},
 	tags map[string]string,
 ) {
-	bp.mu.Lock()
-	defer bp.mu.Unlock()
+	bp.Lock()
+	defer bp.Unlock()
 
 	measurement = bp.Prefix + measurement
 
