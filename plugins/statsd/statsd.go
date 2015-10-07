@@ -137,22 +137,22 @@ func (s *Statsd) Gather(acc plugins.Accumulator) error {
 		}
 	}
 
-	for _, cmetric := range s.gauges {
-		acc.Add(cmetric.name, cmetric.value, cmetric.tags)
+	for _, metric := range s.gauges {
+		acc.Add(metric.name, metric.value, metric.tags)
 	}
 	if s.DeleteGauges {
 		s.gauges = make(map[string]cachedgauge)
 	}
 
-	for _, cmetric := range s.counters {
-		acc.Add(cmetric.name, cmetric.value, cmetric.tags)
+	for _, metric := range s.counters {
+		acc.Add(metric.name, metric.value, metric.tags)
 	}
 	if s.DeleteCounters {
 		s.counters = make(map[string]cachedcounter)
 	}
 
-	for _, cmetric := range s.sets {
-		acc.Add(cmetric.name, int64(len(cmetric.set)), cmetric.tags)
+	for _, metric := range s.sets {
+		acc.Add(metric.name, int64(len(metric.set)), metric.tags)
 	}
 	if s.DeleteSets {
 		s.sets = make(map[string]cachedset)
@@ -235,14 +235,15 @@ func (s *Statsd) parseStatsdLine(line string) error {
 	s.Lock()
 	defer s.Unlock()
 
-	// Validate splitting the line on "|"
 	m := metric{}
-	parts1 := strings.Split(line, "|")
-	if len(parts1) < 2 {
+
+	// Validate splitting the line on "|"
+	pipesplit := strings.Split(line, "|")
+	if len(pipesplit) < 2 {
 		log.Printf("Error: splitting '|', Unable to parse metric: %s\n", line)
 		return errors.New("Error Parsing statsd line")
-	} else if len(parts1) > 2 {
-		sr := parts1[2]
+	} else if len(pipesplit) > 2 {
+		sr := pipesplit[2]
 		errmsg := "Error: parsing sample rate, %s, it must be in format like: " +
 			"@0.1, @0.5, etc. Ignoring sample rate for line: %s\n"
 		if strings.Contains(sr, "@") && len(sr) > 1 {
@@ -250,6 +251,7 @@ func (s *Statsd) parseStatsdLine(line string) error {
 			if err != nil {
 				log.Printf(errmsg, err.Error(), line)
 			} else {
+				// sample rate successfully parsed
 				m.samplerate = samplerate
 			}
 		} else {
@@ -258,24 +260,24 @@ func (s *Statsd) parseStatsdLine(line string) error {
 	}
 
 	// Validate metric type
-	switch parts1[1] {
+	switch pipesplit[1] {
 	case "g", "c", "s", "ms", "h":
-		m.mtype = parts1[1]
+		m.mtype = pipesplit[1]
 	default:
-		log.Printf("Error: Statsd Metric type %s unsupported", parts1[1])
+		log.Printf("Error: Statsd Metric type %s unsupported", pipesplit[1])
 		return errors.New("Error Parsing statsd line")
 	}
 
 	// Validate splitting the rest of the line on ":"
-	parts2 := strings.Split(parts1[0], ":")
-	if len(parts2) != 2 {
+	colonsplit := strings.Split(pipesplit[0], ":")
+	if len(colonsplit) != 2 {
 		log.Printf("Error: splitting ':', Unable to parse metric: %s\n", line)
 		return errors.New("Error Parsing statsd line")
 	}
-	m.bucket = parts2[0]
+	m.bucket = colonsplit[0]
 
 	// Parse the value
-	if strings.ContainsAny(parts2[1], "-+") {
+	if strings.ContainsAny(colonsplit[1], "-+") {
 		if m.mtype != "g" {
 			log.Printf("Error: +- values are only supported for gauges: %s\n", line)
 			return errors.New("Error Parsing statsd line")
@@ -285,14 +287,14 @@ func (s *Statsd) parseStatsdLine(line string) error {
 
 	switch m.mtype {
 	case "g", "ms", "h":
-		v, err := strconv.ParseFloat(parts2[1], 64)
+		v, err := strconv.ParseFloat(colonsplit[1], 64)
 		if err != nil {
 			log.Printf("Error: parsing value to float64: %s\n", line)
 			return errors.New("Error Parsing statsd line")
 		}
 		m.floatvalue = v
 	case "c", "s":
-		v, err := strconv.ParseInt(parts2[1], 10, 64)
+		v, err := strconv.ParseInt(colonsplit[1], 10, 64)
 		if err != nil {
 			log.Printf("Error: parsing value to int64: %s\n", line)
 			return errors.New("Error Parsing statsd line")
@@ -304,8 +306,18 @@ func (s *Statsd) parseStatsdLine(line string) error {
 		m.intvalue = v
 	}
 
-	// Parse the name
-	m.name, m.tags = s.parseName(m)
+	// Parse the name & tags from bucket
+	m.name, m.tags = s.parseName(m.bucket)
+	switch m.mtype {
+	case "c":
+		m.tags["metric_type"] = "counter"
+	case "g":
+		m.tags["metric_type"] = "gauge"
+	case "s":
+		m.tags["metric_type"] = "set"
+	case "ms", "h":
+		m.tags["metric_type"] = "timer"
+	}
 
 	// Make a unique key for the measurement name/tags
 	var tg []string
@@ -334,34 +346,51 @@ func (s *Statsd) parseStatsdLine(line string) error {
 // config file. If there is a match, it will parse the name of the metric and
 // map of tags.
 // Return values are (<name>, <tags>)
-func (s *Statsd) parseName(m metric) (string, map[string]string) {
-	name := m.bucket
+func (s *Statsd) parseName(bucket string) (string, map[string]string) {
 	tags := make(map[string]string)
 
-	o := graphite.Options{
-		Separator: "_",
-		Templates: s.Templates,
+	bucketparts := strings.Split(bucket, ",")
+	// Parse out any tags in the bucket
+	if len(bucketparts) > 1 {
+		for _, btag := range bucketparts[1:] {
+			k, v := parseKeyValue(btag)
+			if k != "" {
+				tags[k] = v
+			}
+		}
 	}
 
+	o := graphite.Options{
+		Separator:   "_",
+		Templates:   s.Templates,
+		DefaultTags: tags,
+	}
+
+	name := bucketparts[0]
 	p, err := graphite.NewParserWithOptions(o)
 	if err == nil {
-		name, tags = p.ApplyTemplate(m.bucket)
+		name, tags = p.ApplyTemplate(name)
 	}
 	name = strings.Replace(name, ".", "_", -1)
 	name = strings.Replace(name, "-", "__", -1)
 
-	switch m.mtype {
-	case "c":
-		tags["metric_type"] = "counter"
-	case "g":
-		tags["metric_type"] = "gauge"
-	case "s":
-		tags["metric_type"] = "set"
-	case "ms", "h":
-		tags["metric_type"] = "timer"
+	return name, tags
+}
+
+// Parse the key,value out of a string that looks like "key=value"
+func parseKeyValue(keyvalue string) (string, string) {
+	var key, val string
+
+	split := strings.Split(keyvalue, "=")
+	// Must be exactly 2 to get anything meaningful out of them
+	if len(split) == 2 {
+		key = split[0]
+		val = split[1]
+	} else if len(split) == 1 {
+		val = split[0]
 	}
 
-	return name, tags
+	return key, val
 }
 
 // aggregate takes in a metric of type "counter", "gauge", or "set". It then
